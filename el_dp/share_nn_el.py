@@ -11,11 +11,63 @@ import jieba
 import os
 import random
 import cPickle as pickle
+import time
 
-# load word2vec
-sen_fix_len = 76 
-tr_size = 5000*2
-batch_size = 20 
+#Parameters 
+sen_fix_len = 100 #句子长度 
+word_len = 300 #词向量长度
+tr_size = 1000*2 #
+batch_size = 128 
+epoch_size = 40
+learn_rate = 0.001 #重要参数
+display_step = 10
+
+#Network parameters
+n_input = sen_fix_len*word_len
+n_out = 100 
+drop_out = 0.5 
+
+#tf Graph Input
+images_L = tf.placeholder(tf.float32,shape=([None,n_input]),name='L')
+images_R = tf.placeholder(tf.float32,shape=([None,n_input]),name='R')
+labels = tf.placeholder(tf.float32,shape=([None,1]),name='gt')
+dropout_f = tf.placeholder("float")
+
+
+
+def mclnet(x,_dropout):
+    # first convolutional layer
+    x_image = tf.reshape(x, [-1, sen_fix_len, word_len, 1])
+    W_conv1 = weight_variable([5,5,1,10],"W_conv1")
+    b_conv1 = bias_variable([10],"b_conv1")   
+    h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
+    h_pool1 = max_pool_2x2(h_conv1)
+
+    # seconed convolutional layer
+    W_conv2 = weight_variable([5,5,10,5], "W_conv2")
+    b_conv2 = bias_variable([5], "b_conv2")
+    h_conv2 = tf.nn.relu(conv2d(h_pool1, W_conv2) + b_conv2)
+    h_pool2 = max_pool_2x2(h_conv2)
+
+    # densely connected layer
+    W_fc1 = weight_variable([(sen_fix_len)/4*(word_len/4)*5,(sen_fix_len/4)*(word_len/4)*5],"W_fc1")
+    b_fc1 = bias_variable([(sen_fix_len)/4*(word_len/4)*5],"b_fc1")
+
+    h_pool2_flat = tf.reshape(h_pool2,[-1,(sen_fix_len)/4*(word_len/4)*5])
+    h_fc1 = tf.nn.relu(tf.matmul(h_pool2_flat, W_fc1) + b_fc1)
+
+    # droput 
+    h_fc1_drop = tf.nn.dropout(h_fc1, _dropout)
+
+    # readout layer
+    W_fc2 = weight_variable([(sen_fix_len)/4*(word_len/4)*5,100],"W_out")
+    b_fc2 = bias_variable(100,"b_out")
+
+    y_conv = tf.nn.softmax(tf.matmul(h_fc1_drop,W_fc2) + b_fc2)
+
+    return y_conv
+
+
 def get_sentence_vector(sentence):
     global model
     global sen_fix_len
@@ -34,7 +86,8 @@ def get_sentence_vector(sentence):
         cnt += 1
 
     if len(sentence_vec) < sen_fix_len:  
-       sentence_vec.extend([[2.0]*300]*(sen_fix_len - len(sentence_vec)))
+        #print 'not length'  
+        sentence_vec.extend([[1.0]*300]*(sen_fix_len - len(sentence_vec)))
 
     #print np.array(sentence_vec).reshape(-1).shape
     return np.array(sentence_vec).reshape(-1)
@@ -44,14 +97,11 @@ def gen_entity_text_vec():
     data_dir = "./data/entity_text/"
     filelist = os.listdir(data_dir) 
     for filename in filelist:
-        #print filename
         filepath = data_dir + filename
         with open(filepath) as fr:
             text = fr.read()
             text_vec = get_sentence_vector(text)
             entity_text_dict_vec[filename] = text_vec
-            
-    #pickle.dump(entity_text_dict_vec,open("entity_text_dict_vec.pk","w"))     
     return entity_text_dict_vec
 
 
@@ -69,6 +119,22 @@ def gen_mention_text_vec():
     #pickle.dump(mention_text_dict_vec, open("mention_text_dict_vec.pk","w"))
     return mention_text_dict_vec
 
+def gen_mention_text_vec_loc():
+    mention_text_dict_vec = {} 
+    data_dir = "./data/mention_text/"
+    filelist = os.listdir(data_dir)
+    for filename in filelist:
+        # print filename
+        filepath = data_dir + filename
+        with open(filepath) as fr:
+            text = fr.read()
+            text_vec = get_sentence_vector(text)
+            mention_text_dict_vec[filename] = text_vec
+    #pickle.dump(mention_text_dict_vec, open("mention_text_dict_vec.pk","w"))
+    return mention_text_dict_vec
+
+
+
 def create_mention_entity_pairs(mention_text_dict_vec, entity_text_dict_vec):
     pairs = []
     labels = []
@@ -80,6 +146,9 @@ def create_mention_entity_pairs(mention_text_dict_vec, entity_text_dict_vec):
             #print line
             tokens = line.split("\t")
             mention_text_id = tokens[3].split(":")[0]
+            start, end = tokens[3].split(":")[1].split('-')
+            start = int(start)
+            end = int(end)
             entity_text_id = tokens[4]
             m_type = tokens[6]
             if "NOM" in m_type:
@@ -89,13 +158,11 @@ def create_mention_entity_pairs(mention_text_dict_vec, entity_text_dict_vec):
             #print cnt
             cnt += 2 
             mention_text_vec = mention_text_dict_vec[mention_text_id+".xml"]
-            #mention_text_vec = get_sentence_vector(mention_text)
             entity_text_vec = entity_text_dict_vec[entity_text_id]
-            #entity_text_vec = get_sentence_vector(entity_text)
             pairs += [[mention_text_vec, entity_text_vec]]
             labels += [1]
-
-            # error pairs.
+            
+	    # error pairs.
             entity_keys = entity_text_dict_vec.keys()
             entity_random_id = entity_keys[random.randint(0, len(entity_keys)-1)]
             while entity_random_id == entity_text_id:
@@ -124,41 +191,6 @@ def max_pool_2x2(x):
     return tf.nn.max_pool(x,ksize=[1,2,2,1], strides=[1,2,2,1], padding='SAME')
 
 
-def mclnet(x,_dropout):
-    # first convolutional layer
-    x_image = tf.reshape(x, [-1,sen_fix_len,300,1])
-    W_conv1 = weight_variable([5,5,1,10],"W_conv1")
-    b_conv1 = bias_variable([10],"b_conv1")   
-    h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
-    h_pool1 = max_pool_2x2(h_conv1)
-
-    # seconed convolutional layer
-    W_conv2 = weight_variable([5,5,10,5], "W_conv2")
-    b_conv2 = bias_variable([5], "b_conv2")
-    h_conv2 = tf.nn.relu(conv2d(h_pool1, W_conv2) + b_conv2)
-    h_pool2 = max_pool_2x2(h_conv2)
-
-
-    # densely connected layer
-    W_fc1 = weight_variable([(sen_fix_len/4)*75*5, (sen_fix_len/4)*75*5],"W_fc1")
-    b_fc1 = bias_variable([(sen_fix_len/4)*75*5],"b_fc1")
-
-    h_pool2_flat = tf.reshape(h_pool2,[-1,(sen_fix_len/4)*75*5])
-    h_fc1 = tf.nn.relu(tf.matmul(h_pool2_flat, W_fc1) + b_fc1)
-
-    # droput 
-    h_fc1_drop = tf.nn.dropout(h_fc1, _dropout)
-    # h_fc1_drop = tf.nn.dropout(h_fc1, )
-
-    # readout layer
-    W_fc2 = weight_variable([(sen_fix_len/4)*75*5,100],"W_fc2")
-    b_fc2 = bias_variable([100],"b_fc2")
-
-    y_conv = tf.nn.softmax(tf.matmul(h_fc1_drop,W_fc2) + b_fc2)
-
-    return y_conv
-
-
 def contrastive_loss(y,d):
     #tmp= y *tf.square(d)
     tmp= tf.mul(y,tf.square(d))
@@ -167,22 +199,32 @@ def contrastive_loss(y,d):
     return tf.reduce_sum(tmp +tmp2)/batch_size/2
 
 def compute_accuracy(prediction,labels):
-    return labels[prediction.ravel() < 0.5].mean()
-# return tf.reduce_mean(labels[prediction.ravel() < 0.5])
+    #return labels[prediction.ravel() < 0.5].mean()
+
+    a = labels[prediction.ravel() >= 0.5]
+    b = labels[prediction.ravel() < 0.5]
+    a = a[a==1]
+    b = b[b==1]
+    print prediction.ravel()
+    print float(len(a)+len(b)) / float(len(labels)) 
+    return float(len(a)+len(b)) / float(len(labels)) 
+    #return l.mean()
+    #return tf.reduce_mean(labels[prediction.ravel() < 0.5])
+
+
 def next_batch(s,e,inputs,labels):
+    print inputs.shape
     input1 = inputs[s:e,0]
     input2 = inputs[s:e,1]
+    print input1.shape
+    print input2.shape
     y = np.reshape(labels[s:e],(len(range(s,e)),1))
     return np.array(input1),np.array(input2),np.array(y)
 
 global_step = tf.Variable(0,trainable=False)
 starter_learning_rate = 0.001
-learning_rate = tf.train.exponential_decay(starter_learning_rate,global_step,10,0.1,staircase=True)
 
-images_L = tf.placeholder(tf.float32,shape=([None,sen_fix_len*300]),name='L')
-images_R = tf.placeholder(tf.float32,shape=([None,sen_fix_len*300]),name='R')
-labels = tf.placeholder(tf.float32,shape=([None,1]),name='gt')
-dropout_f = tf.placeholder("float")
+learning_rate = tf.train.exponential_decay(starter_learning_rate,global_step,10,0.1,staircase=True)
 
 
 with tf.variable_scope("siamese") as scope:
@@ -191,11 +233,12 @@ with tf.variable_scope("siamese") as scope:
 	model2 = mclnet(images_R, dropout_f)
 
 
-distance  = tf.sqrt(tf.reduce_sum(tf.pow(tf.sub(model1,model2),2),1,keep_dims=True))
-loss = contrastive_loss(labels,distance)
+predict  = tf.sqrt(tf.reduce_sum(tf.pow(tf.sub(model1,model2),2),1,keep_dims=True))
+loss = contrastive_loss(labels,predict)
 
-batch = tf.Variable(0)
-optimizer = tf.train.AdamOptimizer(learning_rate = 0.00001).minimize(loss)
+optimizer = tf.train.AdamOptimizer(learning_rate = learning_rate)
+train_op = optimizer.minimize(loss)
+
 
 print "load word2vec model"
 t_start = time.time()
@@ -219,51 +262,52 @@ else:
     mention_text_dict_vec = dict(gen_mention_text_vec())
 print "gen mention_text_dict_vec ok, use time %.3fs" % (time.time() - t_start)
 
+del model
+
 print "create_mention_entity_pairs"
 t_start = time.time()
 tr_pairs, tr_labels = create_mention_entity_pairs(mention_text_dict_vec, entity_text_dict_vec) 
 print "create_mention_entity_pairs ok, use time%.3fs" % (time.time() - t_start)
 
+print tr_pairs.shape
+print tr_labels.shape
 
+del entity_text_dict_vec
+del mention_text_dict_vec
 
-input1,input2,y =next_batch(0,10,tr_pairs,tr_labels)
-print input1.shape
-print input2.shape
-print y.shape
-
+'''
+init = tf.initialize_all_variables()
 
 with tf.Session() as sess:
 	# sess.run(init)
 	print "init variables"
-	tf.initialize_all_variables().run()
+	sess.run(init)
 	print "init variables ok"
 	# Training cycle
-	for epoch in range(30):
+	for epoch in range(epoch_size):
         	avg_loss = 0.
 		avg_acc = 0.
         	total_batch = tr_size / batch_size - 1 
 		start_time = time.time()
 		# Loop over all batches
 		for i in range(total_batch):
-			#print i
-			# print i
 			s  = i * batch_size
 			e = (i+1) *batch_size
-			# Fit training using batch data
 			input1,input2,y =next_batch(s,e,tr_pairs,tr_labels)
-                        #print input1.shape
-                        #print input2.shape
                         #print y.shape
-			_,loss_value,predict=sess.run([optimizer,loss,distance], feed_dict={images_L:input1,images_R:input2 ,labels:y,dropout_f:0.9})
-			feature1=model1.eval(feed_dict={images_L:input1,dropout_f:0.9})
-			feature2=model2.eval(feed_dict={images_R:input2,dropout_f:0.9})
-			tr_acc = compute_accuracy(predict,y)
+                        print input1.shape
+                        print input2
+			_,loss_value,prediction = sess.run([train_op,loss,predict],
+				 feed_dict={images_L:input1,images_R:input2 ,labels:y,dropout_f:drop_out})
+			current_step = tf.train.global_step(sess,global_step)
+			tr_acc = compute_accuracy(prediction,y)
 			if math.isnan(tr_acc) and epoch != 0:
 				print('tr_acc %0.2f' % tr_acc)
-				continue
+			        continue	
 			avg_loss += loss_value
 			avg_acc +=tr_acc*100
-# print('epoch %d loss %0.2f' %(epoch,avg_loss/total_batch))
+                        #print "loss_value:%f" % loss_value
+                        # print('epoch %d loss %0.2f' %(epoch,avg_loss/total_batch))
 		duration = time.time() - start_time
 		print('epoch %d  time: %f loss %0.5f acc %0.2f' %(epoch,duration,avg_loss/(total_batch),avg_acc/total_batch))
                 if epoch % 5 == 0:
@@ -272,9 +316,9 @@ with tf.Session() as sess:
                         s = i* batch_size
                         e = (i+1)*batch_size
                         input1,input2,y = next_batch(s,e,tr_pairs,tr_labels)
-                        prediction = distance.eval(feed_dict={images_L:input1,images_R:input2, labels:y,dropout_f:1.0})
+                        prediction = predict.eval(feed_dict={images_L:input1,images_R:input2, labels:y,dropout_f:1.0})
                         acc += compute_accuracy(prediction,y)*100
                     print("accuract training set %0.2f" %  (acc/total_batch))
                         
 
-
+'''
